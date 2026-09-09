@@ -58,4 +58,7 @@ dependencies {
         exclude(group = "org.json", module = "json")
     }
     implementation("io.coil-kt:coil-compose:2.5.0")
+    // Shizuku Official Native API
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
 }

@@ -1,6 +1,6 @@
 {
   "name": "rjtool-socket-engine",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "main": "server.js",
   "dependencies": {
     "@supabase/supabase-js": "^2.43.0",

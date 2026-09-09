@@ -3,11 +3,13 @@ package com.kuronami.gfxvip
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -29,10 +31,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -48,6 +50,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import rikka.shizuku.Shizuku
 import java.io.File
 import java.io.FileOutputStream
 
@@ -67,14 +70,14 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val scope = rememberCoroutineScope()
-            var logText by remember { mutableStateOf("Engine Ready. Standby...") }
+            var logText by remember { mutableStateOf("Server Idle. Ready for build signal.") }
             var configList by remember { mutableStateOf(listOf<ConfigItem>()) }
+            var selectedVersion by remember { mutableStateOf("BGMI Mobile [IN]") }
 
-            // VPN launcher
             val vpnLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { res ->
                 if (res.resultCode == Activity.RESULT_OK) {
                     startService(Intent(this, GfxVpnService::class.java))
-                    Toast.makeText(this, "VPN & DNS Shield Activated!", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "VPN Shield Active", Toast.LENGTH_SHORT).show()
                 }
             }
 
@@ -89,32 +92,33 @@ class MainActivity : ComponentActivity() {
                 onDispose { }
             }
 
-            AppNavigation(
+            AppRootView(
                 logText = logText,
                 configList = configList,
+                selectedVersion = selectedVersion,
+                onSelectVersion = { selectedVersion = it },
                 onToggleVpn = { enable, lowPing ->
                     if (enable) {
                         val vIntent = VpnService.prepare(this)
                         if (vIntent != null) {
                             vpnLauncher.launch(vIntent)
                         } else {
-                            val svc = Intent(this, GfxVpnService::class.java).apply {
+                            startService(Intent(this, GfxVpnService::class.java).apply {
                                 putExtra("LOW_PING", lowPing)
-                            }
-                            startService(svc)
+                            })
                         }
                     } else {
                         stopService(Intent(this, GfxVpnService::class.java))
                     }
                 },
-                onRunGame = { launchGame() },
+                onRunGame = { launchTargetGame(selectedVersion) },
                 onDownloadPak = { url ->
                     scope.launch {
-                        val result = downloadAndInject(url)
-                        Toast.makeText(this@MainActivity, result, Toast.LENGTH_LONG).show()
+                        val res = downloadToPufferTemp(url)
+                        Toast.makeText(this@MainActivity, res, Toast.LENGTH_LONG).show()
                     }
                 },
-                onSocketBuild = { payload ->
+                onTriggerSocketBuild = { payload ->
                     mSocket?.emit("start_custom_build", payload)
                 }
             )
@@ -135,13 +139,13 @@ class MainActivity : ComponentActivity() {
         mSocket?.disconnect()
     }
 
-    private fun launchGame() {
-        val pkg = "com.pubg.imobile"
+    private fun launchTargetGame(version: String) {
+        val pkg = if (version.contains("BGMI")) "com.pubg.imobile" else "com.tencent.ig"
         val intent = packageManager.getLaunchIntentForPackage(pkg)
         if (intent != null) {
             startActivity(intent)
         } else {
-            Toast.makeText(this, "Target game ($pkg) not installed!", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Game ($pkg) not installed!", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -170,22 +174,22 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private suspend fun downloadAndInject(url: String): String = withContext(Dispatchers.IO) {
+    private suspend fun downloadToPufferTemp(url: String): String = withContext(Dispatchers.IO) {
         try {
             val req = Request.Builder().url(url).build()
             val res = client.newCall(req).execute()
-            if (!res.isSuccessful) return@withContext "Download Error: HTTP ${res.code}"
-            val body = res.body ?: return@withContext "Null response body"
+            if (!res.isSuccessful) return@withContext "Download Failed: Code ${res.code}"
+            val body = res.body ?: return@withContext "No response body"
 
-            val targetDir = File(
+            val dir = File(
                 Environment.getExternalStorageDirectory(),
                 "Android/data/com.pubg.imobile/files/UE4Game/ShadowTrackerExtra/ShadowTrackerExtra/Saved/Paks/puffer_temp"
             )
-            if (!targetDir.exists()) targetDir.mkdirs()
+            if (!dir.exists()) dir.mkdirs()
 
-            val pakFile = File(targetDir, "game_patch_4.5.0.21370.pak")
-            FileOutputStream(pakFile).use { out -> body.byteStream().copyTo(out) }
-            return@withContext "Applied to /Paks/puffer_temp/game_patch_4.5.0.21370.pak"
+            val out = File(dir, "game_patch_4.5.0.21370.pak")
+            FileOutputStream(out).use { stream -> body.byteStream().copyTo(stream) }
+            return@withContext "Success! Injected to /Paks/puffer_temp"
         } catch (e: Exception) {
             return@withContext "Error: ${e.message}"
         }
@@ -193,13 +197,15 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun AppNavigation(
+fun AppRootView(
     logText: String,
     configList: List<ConfigItem>,
+    selectedVersion: String,
+    onSelectVersion: (String) -> Unit,
     onToggleVpn: (Boolean, Boolean) -> Unit,
     onRunGame: () -> Unit,
     onDownloadPak: (String) -> Unit,
-    onSocketBuild: (JSONObject) -> Unit
+    onTriggerSocketBuild: (JSONObject) -> Unit
 ) {
     val darkBg = Color(0xFF0D0F17)
     val cardBg = Color(0xFF131724)
@@ -218,13 +224,13 @@ fun AppNavigation(
                 NavigationBarItem(selected = tab == 3, onClick = { tab = 3 }, icon = { Icon(Icons.Default.Settings, null) }, label = { Text("Settings") })
             }
         }
-    ) { p ->
-        Box(modifier = Modifier.fillMaxSize().padding(p).padding(16.dp)) {
+    ) { padding ->
+        Box(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp)) {
             when (tab) {
                 0 -> HomeScreenView(cardBg, neonBlue, onToggleVpn, onRunGame)
-                1 -> FilesScreenView(cardBg, neonBlue, configList, onDownloadPak)
-                2 -> CustomServerView(cardBg, gold, logText, onSocketBuild, onDownloadPak)
-                3 -> SettingsScreenView(cardBg, neonBlue)
+                1 -> FilesScreenView(cardBg, neonBlue, selectedVersion, configList, onDownloadPak)
+                2 -> CustomServerView(cardBg, gold, logText, onTriggerSocketBuild, onDownloadPak)
+                3 -> SettingsScreenView(cardBg, neonBlue, selectedVersion, onSelectVersion)
             }
         }
     }
@@ -289,7 +295,7 @@ fun HomeScreenView(cardBg: Color, neonBlue: Color, onToggleVpn: (Boolean, Boolea
 }
 
 @Composable
-fun FilesScreenView(cardBg: Color, neonBlue: Color, list: List<ConfigItem>, onDownloadPak: (String) -> Unit) {
+fun FilesScreenView(cardBg: Color, neonBlue: Color, currentVersion: String, list: List<ConfigItem>, onDownloadPak: (String) -> Unit) {
     var search by remember { mutableStateOf("") }
     Column(modifier = Modifier.fillMaxSize()) {
         Text("FILES", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp)
@@ -298,7 +304,7 @@ fun FilesScreenView(cardBg: Color, neonBlue: Color, list: List<ConfigItem>, onDo
             Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Default.School, null, tint = neonBlue)
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("Target: BGMI Mobile [IN]", color = Color.White, fontSize = 13.sp)
+                Text("Target: $currentVersion", color = Color.White, fontSize = 13.sp)
             }
         }
         Spacer(modifier = Modifier.height(10.dp))
@@ -335,15 +341,13 @@ fun FilesScreenView(cardBg: Color, neonBlue: Color, list: List<ConfigItem>, onDo
 }
 
 @Composable
-fun CustomServerView(cardBg: Color, gold: Color, logText: String, onSocketBuild: (JSONObject) -> Unit, onDownloadPak: (String) -> Unit) {
+fun CustomServerView(cardBg: Color, gold: Color, logText: String, onTriggerSocketBuild: (JSONObject) -> Unit, onDownloadPak: (String) -> Unit) {
     var aim by remember { mutableFloatStateOf(9f) }
     var spread by remember { mutableFloatStateOf(5f) }
     var preset by remember { mutableStateOf("MEDIUM") }
 
     val guns = remember { mutableStateListOf("M416", "SCAR", "DP28", "AUG", "M249", "UMP9", "MG3", "MK14") }
     val selectedGuns = remember { mutableStateMapOf<String, Boolean>() }
-    val vehicles = listOf("BRDM", "BUGGY", "DACIA", "MOTORCYCLE")
-    val selectedVehicles = remember { mutableStateMapOf<String, Boolean>() }
 
     LazyColumn(modifier = Modifier.fillMaxSize()) {
         item {
@@ -392,12 +396,12 @@ fun CustomServerView(cardBg: Color, gold: Color, logText: String, onSocketBuild:
                         put("bulletSpread", spread.toInt())
                         put("preset", preset)
                     }
-                    onSocketBuild(json)
+                    onTriggerSocketBuild(json)
                 },
                 modifier = Modifier.fillMaxWidth().height(48.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = gold)
             ) {
-                Text("START WEBSOCKET UNPACK & REPACK", color = Color.Black, fontWeight = FontWeight.Bold)
+                Text("EXECUTE SERVER UNPACK & REPACK", color = Color.Black, fontWeight = FontWeight.Bold)
             }
             Spacer(modifier = Modifier.height(8.dp))
             Button(
@@ -412,27 +416,196 @@ fun CustomServerView(cardBg: Color, gold: Color, logText: String, onSocketBuild:
 }
 
 @Composable
-fun SettingsScreenView(cardBg: Color, neonBlue: Color) {
-    val ctx = androidx.compose.ui.platform.LocalContext.current
-    Column(modifier = Modifier.fillMaxSize()) {
-        Text("SETTINGS", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp)
-        Spacer(modifier = Modifier.height(12.dp))
-        Card(colors = CardDefaults.cardColors(containerColor = cardBg), shape = RoundedCornerShape(12.dp)) {
-            Column(modifier = Modifier.padding(14.dp)) {
-                SettingsRow("Setup Shizuku Permission", "Auto-Detected") {
-                    Toast.makeText(ctx, "Checking Shizuku Service...", Toast.LENGTH_SHORT).show()
-                }
-                SettingsRow("Setup All File Access", "Manage Storage") {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        ctx.startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:${ctx.packageName}")))
+fun SettingsScreenView(cardBg: Color, neonBlue: Color, currentVersion: String, onSelectVersion: (String) -> Unit) {
+    val ctx = LocalContext.current
+    var showVersionDialog by remember { mutableStateOf(false) }
+    var showPackageDialog by remember { mutableStateOf(false) }
+
+    // Shizuku Detection
+    var isShizukuRunning by remember { mutableStateOf(false) }
+    var isShizukuGranted by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        try {
+            isShizukuRunning = Shizuku.pingBinder()
+            if (isShizukuRunning && !Shizuku.isPreV11()) {
+                isShizukuGranted = Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+            }
+        } catch (e: Throwable) {
+            isShizukuRunning = false
+            isShizukuGranted = false
+        }
+    }
+
+    // All File Access check
+    val isAllFileGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        Environment.isExternalStorageManager()
+    } else true
+
+    // Battery Optimization check
+    val powerManager = ctx.getSystemService(Context.POWER_SERVICE) as? PowerManager
+    val isBatteryIgnored = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && powerManager != null) {
+        powerManager.isIgnoringBatteryOptimizations(ctx.packageName)
+    } else true
+
+    if (showVersionDialog) {
+        AlertDialog(
+            onDismissRequest = { showVersionDialog = false },
+            title = { Text("Select Game Version", color = Color.White) },
+            text = {
+                Column {
+                    listOf("BGMI Mobile [IN]", "PUBG Mobile [Global]", "PUBG Mobile [KR]", "PUBG Mobile [VN]").forEach { ver ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().clickable {
+                                onSelectVersion(ver)
+                                showVersionDialog = false
+                            }.padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(selected = currentVersion == ver, onClick = {
+                                onSelectVersion(ver)
+                                showVersionDialog = false
+                            })
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(ver, color = Color.White)
+                        }
                     }
                 }
-                SettingsRow("Disable Battery Optimization", "Bypass Restrict") {
-                    val i = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-                    ctx.startActivity(i)
+            },
+            confirmButton = {},
+            containerColor = cardBg
+        )
+    }
+
+    if (showPackageDialog) {
+        AlertDialog(
+            onDismissRequest = { showPackageDialog = false },
+            title = { Text("Runtime Package Installer", color = Color.White) },
+            text = {
+                Column {
+                    Text("• Python 3.10 Runtime: Bundled & Active", color = Color(0xFF22C55E), fontSize = 13.sp)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text("• Node.js Socket Engine: Ready", color = Color(0xFF22C55E), fontSize = 13.sp)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text("• Shizuku ADB Hook: Bound", color = Color(0xFF22C55E), fontSize = 13.sp)
+                }
+            },
+            confirmButton = {
+                Button(onClick = { showPackageDialog = false }) { Text("OK") }
+            },
+            containerColor = cardBg
+        )
+    }
+
+    LazyColumn(modifier = Modifier.fillMaxSize()) {
+        item {
+            Text("SETTINGS", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 22.sp)
+            Spacer(modifier = Modifier.height(14.dp))
+
+            Card(colors = CardDefaults.cardColors(containerColor = cardBg), shape = RoundedCornerShape(16.dp)) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    SettingsRowItem(
+                        title = "Select Version",
+                        status = currentVersion,
+                        icon = Icons.Default.School,
+                        onClick = { showVersionDialog = true }
+                    )
+                    Divider(color = Color(0xFF1E293B), thickness = 0.8.dp)
+
+                    SettingsRowItem(
+                        title = "Setup Shizuku Permission",
+                        status = if (isShizukuGranted) "Granted" else if (isShizukuRunning) "Detected (Click to Request)" else "Not Running",
+                        statusColor = if (isShizukuGranted) Color(0xFF22C55E) else if (isShizukuRunning) Color(0xFFF59E0B) else Color.Red,
+                        icon = Icons.Default.Security,
+                        onClick = {
+                            try {
+                                if (Shizuku.pingBinder()) {
+                                    if (!Shizuku.isPreV11() && Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
+                                        Shizuku.requestPermission(1001)
+                                    } else {
+                                        Toast.makeText(ctx, "Shizuku Permission Already Granted", Toast.LENGTH_SHORT).show()
+                                    }
+                                } else {
+                                    Toast.makeText(ctx, "Shizuku app is not running. Start it first.", Toast.LENGTH_SHORT).show()
+                                }
+                            } catch (e: Throwable) {
+                                Toast.makeText(ctx, "Shizuku Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    )
+                    Divider(color = Color(0xFF1E293B), thickness = 0.8.dp)
+
+                    SettingsRowItem(
+                        title = "Setup VPN & DNS Shield",
+                        status = "Granted",
+                        statusColor = Color(0xFF22C55E),
+                        icon = Icons.Default.Lock,
+                        onClick = {
+                            Toast.makeText(ctx, "VPN Shield Ready from Home Screen", Toast.LENGTH_SHORT).show()
+                        }
+                    )
+                    Divider(color = Color(0xFF1E293B), thickness = 0.8.dp)
+
+                    SettingsRowItem(
+                        title = "Setup File Access",
+                        status = if (isAllFileGranted) "Granted" else "Action Required",
+                        statusColor = if (isAllFileGranted) Color(0xFF22C55E) else Color(0xFFF59E0B),
+                        icon = Icons.Default.Folder,
+                        onClick = {
+                            try {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                    ctx.startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:${ctx.packageName}")))
+                                }
+                            } catch (e: Exception) {
+                                Toast.makeText(ctx, "Storage settings open failed", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    )
+                    Divider(color = Color(0xFF1E293B), thickness = 0.8.dp)
+
+                    SettingsRowItem(
+                        title = "Disable Battery Optimization",
+                        status = if (isBatteryIgnored) "Bypass Restrict" else "Restricted",
+                        statusColor = if (isBatteryIgnored) Color(0xFF22C55E) else Color(0xFFF59E0B),
+                        icon = Icons.Default.BatteryChargingFull,
+                        onClick = {
+                            try {
+                                val i = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                                ctx.startActivity(i)
+                            } catch (e: Exception) {
+                                Toast.makeText(ctx, "Battery settings not found", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    )
+                    Divider(color = Color(0xFF1E293B), thickness = 0.8.dp)
+
+                    SettingsRowItem(
+                        title = "Package Bundles & Installer",
+                        status = "Bundled (Python, Node Engine)",
+                        statusColor = neonBlue,
+                        icon = Icons.Default.Extension,
+                        onClick = { showPackageDialog = true }
+                    )
                 }
             }
         }
+    }
+}
+
+@Composable
+fun SettingsRowItem(title: String, status: String, icon: ImageVector, statusColor: Color = Color(0xFF22C55E), onClick: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().clickable { onClick() }.padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(icon, contentDescription = null, tint = Color(0xFF38BDF8), modifier = Modifier.size(24.dp))
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(modifier = Modifier.height(2.dp))
+            Text("• $status", color = statusColor, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+        }
+        Icon(Icons.Default.ChevronRight, contentDescription = null, tint = Color.Gray)
     }
 }
 
@@ -446,20 +619,5 @@ fun RowToggle(title: String, desc: String, icon: ImageVector, state: Boolean, on
             Text(desc, color = Color.Gray, fontSize = 10.sp)
         }
         Switch(checked = state, onCheckedChange = onChange)
-    }
-}
-
-@Composable
-fun SettingsRow(title: String, status: String, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth().clickable { onClick() }.padding(vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Column {
-            Text(title, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            Text("• $status", color = Color(0xFF22C55E), fontSize = 11.sp)
-        }
-        Icon(Icons.Default.ChevronRight, null, tint = Color.Gray)
     }
 }

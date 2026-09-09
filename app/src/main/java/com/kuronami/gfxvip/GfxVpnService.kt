@@ -14,10 +14,9 @@ class GfxVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         createNotification()
         val isLowPing = intent?.getBooleanExtra("LOW_PING", false) ?: false
-
         try {
             val builder = Builder()
-                .setSession("Kuronami VIP Shield")
+                .setSession("Kuronami Shield")
                 .addAddress("10.1.10.1", 24)
                 .addDnsServer(if (isLowPing) "1.1.1.1" else "8.8.8.8")
                 .addRoute("0.0.0.0", 0)

@@ -16,6 +16,7 @@
         android:requestLegacyExternalStorage="true"
         android:usesCleartextTraffic="true"
         android:theme="@android:style/Theme.Material.NoActionBar">
+        
         <activity
             android:name=".MainActivity"
             android:exported="true">
@@ -33,5 +34,13 @@
                 <action android:name="android.net.VpnService" />
             </intent-filter>
         </service>
+
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
     </application>
 </manifest>
